@@ -20,7 +20,7 @@ Supports local monitoring as well as remote monitoring of third-party systems.
 
 ```
 
-![Screenshot of Dashboard in Action](https://github.com/0x00405A00/rocm-smi-visualizer/blob/main/preview/2026-03-28_21-30.png)
+![Screenshot of Dashboard in Action](https://github.com/0x00405A00/rocm-smi-visualizer/blob/main/preview/preview.png)
 ---
 
 ## Requirements
