@@ -1,0 +1,688 @@
+openapi: 3.0.3
+info:
+  title: ROCm SMI REST API
+  description: |
+    Live AMD GPU metrics served by **rocm-visualizer**.
+
+    ## Authentication
+    All endpoints except `/api/v1/health` and `/api/v1/info` require the
+    `X-API-Token` header.  The token is defined in the `.env` file on the
+    server (`API_TOKEN=…`).
+
+    ## Data freshness
+    The server updates its internal snapshot every `--interval` seconds
+    (default: 2 s).  The `updated` field in each response contains the
+    ISO-8601 timestamp of the last successful rocm-smi poll.
+  version: 1.0.0
+  contact:
+    name: rocm-visualizer
+
+servers:
+  - url: http://localhost:8080
+    description: Local server (default)
+  - url: http://{host}:{port}
+    description: Custom server
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8080"
+
+security:
+  - ApiTokenHeader: []
+
+components:
+  securitySchemes:
+    ApiTokenHeader:
+      type: apiKey
+      in: header
+      name: X-API-Token
+      description: Static token defined in `.env` as `API_TOKEN`.
+
+  schemas:
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        updated:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-03-28T21:00:00.123456"
+        gpu_count:
+          type: integer
+          example: 1
+
+    InfoResponse:
+      type: object
+      properties:
+        driver_version:
+          type: string
+          example: "6.17.0-19-generic"
+        rocm_smi_version:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [4, 0]
+
+    Process:
+      type: object
+      properties:
+        pid:
+          type: string
+          example: "9717"
+        name:
+          type: string
+          example: ollama
+        gpus:
+          type: string
+          description: Number of GPUs used by this process.
+          example: "1"
+        vram:
+          type: string
+          description: VRAM used, human-readable (e.g. "14.7 GB").
+          example: "14.7 GB"
+
+    Gpu:
+      type: object
+      description: Full GPU snapshot as returned by `/api/v1/gpus/{idx}`.
+      properties:
+        idx:
+          type: integer
+          description: Device index (0-based).
+          example: 0
+        name:
+          type: string
+          example: "Radeon RX 7900 XTX"
+        # ── Temperatures ──────────────────────────────────────────────────
+        temp_edge:
+          type: number
+          format: float
+          description: Edge temperature in °C.
+          example: 43.0
+        temp_junction:
+          type: number
+          format: float
+          description: Junction / hotspot temperature in °C.
+          example: 51.0
+        temp_mem:
+          type: number
+          format: float
+          description: Memory temperature in °C.
+          example: 49.0
+        temp_vrgfx:
+          type: number
+          format: float
+          description: Voltage regulator GFX temperature in °C.
+          example: 47.0
+        temp_vrsoc:
+          type: number
+          format: float
+          description: Voltage regulator SoC temperature in °C.
+          example: 46.0
+        temp_vrmem:
+          type: number
+          format: float
+          description: Voltage regulator memory temperature in °C.
+          example: 51.0
+        # ── Utilisation ───────────────────────────────────────────────────
+        gpu_use:
+          type: number
+          format: float
+          description: GPU utilisation in %.
+          example: 89.0
+        vram_pct:
+          type: number
+          format: float
+          description: VRAM allocation in %.
+          example: 63.0
+        vram_used_mb:
+          type: number
+          format: float
+          description: VRAM used in MB.
+          example: 15686.6
+        vram_total_mb:
+          type: number
+          format: float
+          description: Total VRAM in MB.
+          example: 24560.0
+        mem_activity:
+          type: number
+          format: float
+          description: Memory read/write activity in %.
+          example: 47.0
+        vcn_activity:
+          type: number
+          format: float
+          nullable: true
+          description: Video Core Next (VCN) activity in % (first engine).
+          example: 0.0
+        # ── Power ─────────────────────────────────────────────────────────
+        power_avg:
+          type: number
+          format: float
+          description: Average GPU package power in W.
+          example: 142.0
+        power_cap:
+          type: number
+          format: float
+          description: Maximum power cap in W.
+          example: 327.0
+        throttle_val:
+          type: integer
+          description: Raw throttle status bitmask (0 = no throttle).
+          example: 2
+        throttle_label:
+          type: string
+          description: Human-readable throttle reason(s).
+          example: "THROTTLED (PPT1)"
+        perf_level:
+          type: string
+          description: Current performance level.
+          example: auto
+        power_profile:
+          type: string
+          description: Active power profile name.
+          example: "BOOTUP DEFAULT"
+        # ── Clocks ────────────────────────────────────────────────────────
+        sclk:
+          type: number
+          format: float
+          description: Current shader/GPU core clock in MHz.
+          example: 2712.0
+        mclk:
+          type: number
+          format: float
+          description: Current memory clock in MHz.
+          example: 1249.0
+        fclk:
+          type: number
+          format: float
+          description: Current Infinity Fabric clock in MHz.
+          example: 2000.0
+        socclk:
+          type: number
+          format: float
+          description: Current SoC clock in MHz.
+          example: 1285.0
+        avg_gfxclk:
+          type: number
+          format: float
+          description: Average GFX clock frequency in MHz (from GPU metrics).
+          example: 1316.0
+        # ── Voltages ──────────────────────────────────────────────────────
+        voltage:
+          type: number
+          format: float
+          description: Core voltage in mV (legacy single-domain reading).
+          example: 719.0
+        voltage_gfx:
+          type: number
+          format: float
+          description: GFX domain voltage in mV.
+          example: 724.0
+        voltage_soc:
+          type: number
+          format: float
+          description: SoC domain voltage in mV.
+          example: 722.0
+        voltage_mem:
+          type: number
+          format: float
+          description: Memory domain voltage in mV.
+          example: 691.0
+        # ── PCIe ──────────────────────────────────────────────────────────
+        pcie_width:
+          type: number
+          format: float
+          nullable: true
+          description: PCIe link width (number of lanes).
+          example: 16.0
+        pcie_speed:
+          type: number
+          format: float
+          nullable: true
+          description: PCIe link speed in GT/s.
+          example: 16.0
+        # ── Fan ───────────────────────────────────────────────────────────
+        fan_pct:
+          type: number
+          format: float
+          nullable: true
+          description: Fan level in %.
+          example: 20.0
+        fan_rpm:
+          type: number
+          format: float
+          nullable: true
+          description: Fan speed in RPM.
+          example: 895.0
+        # ── Processes ─────────────────────────────────────────────────────
+        processes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Process"
+
+    GpuListResponse:
+      type: object
+      properties:
+        gpus:
+          type: array
+          items:
+            $ref: "#/components/schemas/Gpu"
+        updated:
+          type: string
+          format: date-time
+          nullable: true
+        gpu_count:
+          type: integer
+
+    TemperaturesResponse:
+      type: object
+      properties:
+        gpu_idx:
+          type: integer
+          example: 0
+        edge_c:
+          type: number
+          format: float
+          example: 43.0
+        junction_c:
+          type: number
+          format: float
+          example: 51.0
+        memory_c:
+          type: number
+          format: float
+          example: 49.0
+        vr_gfx_c:
+          type: number
+          format: float
+          example: 47.0
+        vr_soc_c:
+          type: number
+          format: float
+          example: 46.0
+        vr_mem_c:
+          type: number
+          format: float
+          example: 51.0
+
+    ClocksResponse:
+      type: object
+      properties:
+        gpu_idx:
+          type: integer
+          example: 0
+        sclk_mhz:
+          type: number
+          format: float
+          example: 2712.0
+        mclk_mhz:
+          type: number
+          format: float
+          example: 1249.0
+        fclk_mhz:
+          type: number
+          format: float
+          example: 2000.0
+        socclk_mhz:
+          type: number
+          format: float
+          example: 1285.0
+        avg_gfxclk_mhz:
+          type: number
+          format: float
+          example: 1316.0
+
+    PowerResponse:
+      type: object
+      properties:
+        gpu_idx:
+          type: integer
+          example: 0
+        avg_w:
+          type: number
+          format: float
+          example: 142.0
+        cap_w:
+          type: number
+          format: float
+          example: 327.0
+        throttle:
+          type: string
+          example: "THROTTLED (PPT1)"
+        throttle_raw:
+          type: integer
+          example: 2
+        perf_level:
+          type: string
+          example: auto
+        power_profile:
+          type: string
+          example: "BOOTUP DEFAULT"
+
+    MemoryResponse:
+      type: object
+      properties:
+        gpu_idx:
+          type: integer
+          example: 0
+        vram_used_mb:
+          type: number
+          format: float
+          example: 15686.6
+        vram_total_mb:
+          type: number
+          format: float
+          example: 24560.0
+        vram_pct:
+          type: number
+          format: float
+          example: 63.0
+        mem_activity_pct:
+          type: number
+          format: float
+          example: 47.0
+
+    ProcessesResponse:
+      type: object
+      properties:
+        gpu_idx:
+          type: integer
+          example: 0
+        processes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Process"
+
+    LogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          description: Timestamp from journalctl (e.g. "Mär 28 21:00:01").
+          example: "Mär 28 21:00:01"
+        message:
+          type: string
+          description: Log message (source prefix stripped).
+          example: "amdgpu: Freeing queue vital buffer 0x7bf7c0200000"
+        severity:
+          type: string
+          enum: [error, warning, verbose, info]
+          description: |
+            Derived from message content:
+            - `error`   — hang, reset, fail, timeout, crash, panic
+            - `warning` — warn, throttl, limit, exceed, retry
+            - `verbose` — queue evicted, alloc, mapping
+            - `info`    — all other GPU-related kernel messages
+          example: verbose
+
+    LogsResponse:
+      type: object
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogEntry"
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: "Invalid or missing API token."
+
+paths:
+
+  /api/v1/health:
+    get:
+      summary: Health check
+      description: Returns server status and timestamp of the last GPU data poll. No authentication required.
+      operationId: health
+      tags: [system]
+      security: []
+      responses:
+        "200":
+          description: Server is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                updated: "2026-03-28T21:00:00.123456"
+                gpu_count: 1
+
+  /api/v1/info:
+    get:
+      summary: System information
+      description: Returns driver version and rocm-smi version of the server. No authentication required.
+      operationId: getInfo
+      tags: [system]
+      security: []
+      responses:
+        "200":
+          description: System info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InfoResponse"
+              example:
+                driver_version: "6.17.0-19-generic"
+                rocm_smi_version: [4, 0]
+
+  /api/v1/gpus:
+    get:
+      summary: List all GPUs
+      description: Returns the latest full snapshot for every detected GPU.
+      operationId: listGpus
+      tags: [gpu]
+      responses:
+        "200":
+          description: GPU list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GpuListResponse"
+        "401":
+          description: Missing or invalid token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/gpus/{idx}:
+    get:
+      summary: Get single GPU
+      description: Returns the full snapshot for one GPU identified by device index.
+      operationId: getGpu
+      tags: [gpu]
+      parameters:
+        - name: idx
+          in: path
+          required: true
+          schema:
+            type: integer
+            example: 0
+          description: GPU device index (0-based).
+      responses:
+        "200":
+          description: GPU data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Gpu"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: GPU index not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                detail: "GPU 1 not found."
+
+  /api/v1/gpus/{idx}/temperatures:
+    get:
+      summary: GPU temperatures
+      description: Returns all temperature sensors for the given GPU.
+      operationId: getTemperatures
+      tags: [gpu]
+      parameters:
+        - $ref: "#/components/parameters/GpuIdx"
+      responses:
+        "200":
+          description: Temperature readings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemperaturesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/gpus/{idx}/clocks:
+    get:
+      summary: GPU clock frequencies
+      description: Returns current and average clock frequencies for SCLK, MCLK, FCLK and SOCCLK.
+      operationId: getClocks
+      tags: [gpu]
+      parameters:
+        - $ref: "#/components/parameters/GpuIdx"
+      responses:
+        "200":
+          description: Clock frequencies in MHz.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClocksResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/gpus/{idx}/power:
+    get:
+      summary: GPU power & throttle
+      description: Returns power draw, power cap, throttle status, performance level and active power profile.
+      operationId: getPower
+      tags: [gpu]
+      parameters:
+        - $ref: "#/components/parameters/GpuIdx"
+      responses:
+        "200":
+          description: Power data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PowerResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/gpus/{idx}/memory:
+    get:
+      summary: GPU memory usage
+      description: Returns VRAM used/total in MB, allocation percentage and memory activity.
+      operationId: getMemory
+      tags: [gpu]
+      parameters:
+        - $ref: "#/components/parameters/GpuIdx"
+      responses:
+        "200":
+          description: Memory usage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/gpus/{idx}/processes:
+    get:
+      summary: Active GPU processes
+      description: Returns the list of KFD processes currently using the GPU (via `rocm-smi --showpids`).
+      operationId: getProcesses
+      tags: [gpu]
+      parameters:
+        - $ref: "#/components/parameters/GpuIdx"
+      responses:
+        "200":
+          description: Process list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/logs:
+    get:
+      summary: GPU kernel log entries
+      description: |
+        Returns recent GPU-related kernel log lines collected from
+        `journalctl -k`, filtered for `amdgpu`, `kfd`, `rocm` and `drm` keywords.
+        Entries are ordered oldest → newest.
+      operationId: getLogs
+      tags: [system]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+          description: Maximum number of log entries to return.
+      responses:
+        "200":
+          description: Log entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  parameters:
+    GpuIdx:
+      name: idx
+      in: path
+      required: true
+      schema:
+        type: integer
+        example: 0
+      description: GPU device index (0-based).
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            detail: "Invalid or missing API token."
+    NotFound:
+      description: GPU index not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            detail: "GPU 1 not found."
