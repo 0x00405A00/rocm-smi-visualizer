@@ -174,6 +174,38 @@ X-API-Token: <your-token>
 
 Full OpenAPI spec: [`openapi.yaml`](./openapi.yaml)
 
+### Firewall Requirements
+
+For the client to reach the API server, the configured port (default `8080`) must be reachable from the client machine. Depending on the firewall solution in use on the server, allow inbound TCP traffic on that port:
+
+**ufw (Ubuntu/Debian):**
+```bash
+sudo ufw allow 8080/tcp
+```
+
+**firewalld (Fedora/RHEL/Arch):**
+```bash
+sudo firewall-cmd --add-port=8080/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+**iptables:**
+```bash
+sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+```
+
+If you changed `API_PORT` in `.env`, replace `8080` with your configured port in the commands above.
+
+> **Warning:** Opening a port exposes the API to any machine that can reach the server over the network.
+> Before applying firewall rules, carefully consider the following:
+>
+> - **Restrict by source IP** whenever possible — allow only the specific client IP(s) that need access, not `0.0.0.0/0`.
+> - **Never expose the API directly to the public internet** unless you have additional hardening in place (reverse proxy, TLS, rate limiting).
+> - **Review existing firewall rules** before adding new ones to avoid unintended side effects.
+> - **Use a strong, unique `API_TOKEN`** — it is the only authentication layer protecting all GPU data and kernel logs.
+>
+> Firewall rules should be set deliberately and reviewed regularly. A misconfigured firewall can expose sensitive system information to unauthorized parties.
+
 ### Example requests
 
 ```bash
