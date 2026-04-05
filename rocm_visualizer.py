@@ -19,6 +19,8 @@ import subprocess
 import sys
 import threading
 import time
+import subprocess
+from typing import Optional
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -275,6 +277,39 @@ def fetch_driver_version(pat: dict) -> str:
     m = re.search(pat["driver_version"], raw)
     return m.group(1).strip() if m else "N/A"
 
+def fetch_loaded_models() -> Optional[str]:
+    """
+    Führt `ollama ps` aus, extrahiert die Spalten
+    NAME und SIZE und gibt die Modelle als einen
+    Oneliner im Format:
+        NAME (SIZE), NAME (SIZE), …
+    zurück.  Bei keinem geladenen Modell oder Fehler
+    wird None zurückgegeben.
+    """
+    try:
+        result = subprocess.run(
+            ["ollama", "ps"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Ausgabe in Zeilen zerlegen, Header ignorieren
+        lines = result.stdout.strip().splitlines()
+        if len(lines) < 2:          # keine Datenzeilen vorhanden
+            return None
+
+        formatted_parts = []
+        for line in lines[1:]:      # Header (erste Zeile) überspringen
+            parts = line.split()
+            if len(parts) >= 3:    # Mindestens NAME, ID, SIZE vorhanden
+                name, size = parts[0], parts[2]
+                formatted_parts.append(f"{name} ({size} Gb)")
+
+        return ", ".join(formatted_parts) if formatted_parts else None
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 def fetch_power_caps(pat: dict) -> dict:
     raw = run_rocm_smi(*pat["cli_flags_powercap"])
@@ -477,6 +512,7 @@ def make_bar(value: float, total: float, width: int = 20, color: str = "cyan") -
 
 def build_dashboard(
     all_gpus: list[dict],
+    loadedModels: str,
     histories: dict,
     interval: float,
     rocm_version: tuple[int, int],
@@ -662,10 +698,11 @@ def build_dashboard(
         proc_table.add_column("Process",             width=16)
         proc_table.add_column("VRAM",  justify="right", width=10)
         proc_table.add_column("GPU(s)",              width=6)
+        proc_table.add_column("Loaded Models",              width=100)
 
         if g["processes"]:
             for p in g["processes"]:
-                proc_table.add_row(p["pid"], p["name"], p["vram"], p["gpus"])
+                proc_table.add_row(p["pid"], p["name"], p["vram"], p["gpus"],str(loadedModels))
         else:
             proc_table.add_row("[dim]—[/dim]", "[dim]idle[/dim]", "", "")
 
@@ -974,6 +1011,7 @@ class ApiClient:
         return None
 
     def fetch_gpus(self) -> list[dict]:
+        loadedModels = self._get("/api/ps")
         data = self._get("/api/v1/gpus")
         if data is None:
             return []
@@ -998,6 +1036,8 @@ class ApiClient:
             for e in data.get("logs", [])
         ]
 
+    def fetch_loaded_models(self) -> str:
+        return self._get("/api/ps") or "yes"
     def fetch_info(self) -> dict:
         return self._get("/api/v1/info") or {}
 
@@ -1075,6 +1115,7 @@ def main():
         console.print(f"[green]Connected. Driver: {driver_version}  rocm-smi: {rocm_version[0]}.{rocm_version[1]}[/green]")
 
         gpus      = client.fetch_gpus()
+        loadedModels      = client.fetch_loaded_models()
         histories = {
             g["idx"]: {k: deque(maxlen=HISTORY_LEN) for k in history_keys}
             for g in gpus
@@ -1102,7 +1143,7 @@ def main():
                             histories[idx][k].append(v)
 
                 live.update(build_dashboard(
-                    gpus, histories, args.interval,
+                    gpus,loadedModels, histories, args.interval,
                     rocm_version, pattern_key,
                     log_entries=logs,
                     driver_version=driver_version,
@@ -1161,6 +1202,8 @@ def main():
         )
 
     power_caps = fetch_power_caps(pat)
+
+    loadedModels      = fetch_loaded_models()
     gpus = collect_gpu_data(pat, power_caps)
     if not gpus:
         console.print("[red]No ROCm GPUs found. Is rocm-smi installed?[/red]")
@@ -1186,7 +1229,7 @@ def main():
                 store.update(gpus, logs or [])
 
             live.update(build_dashboard(
-                gpus, histories, args.interval,
+                gpus,loadedModels, histories, args.interval,
                 rocm_version, pattern_key,
                 log_entries=logs,
                 driver_version=driver_version,
