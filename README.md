@@ -1,10 +1,10 @@
 # ROCm SMI Visualizer
 
-A live terminal dashboard for AMD GPU monitoring via `rocm-smi`, with a built-in REST API.
+A live terminal dashboard for AMD GPU monitoring via `amd-smi`, with a built-in REST API.
 Supports local monitoring as well as remote monitoring of third-party systems.
 
 ```
-┌─ ROCm SMI Dashboard ─────────────── 2026-03-28 21:00:00 ── rocm-smi 4.0 ── interval: 2s ─┐
+┌─ ROCm SMI Dashboard ─────────────── 2026-03-28 21:00:00 ── amd-smi 4.0 ── interval: 2s ─┐
 │  GPU 0: Radeon RX 7900 XTX   AMD Driver: 6.17.0-19-generic                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────┤
 │ Utilization & Power  │ Temperatures    │ Clock Frequencies  │ Voltages & System            │
@@ -27,7 +27,7 @@ Supports local monitoring as well as remote monitoring of third-party systems.
 
 - Linux (Ubuntu / Arch / Fedora or any distro with ROCm)
 - Python 3.10+
-- ROCm driver stack with `rocm-smi` in `$PATH`
+- ROCm driver stack with `amd-smi` in `$PATH`
 - `python3-venv` package
 
 ```bash
@@ -50,9 +50,9 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Local mode — direct rocm-smi access
+### Local mode — direct amd-smi access
 
-Calls `rocm-smi` locally. No `.env` required.
+Calls `amd-smi` locally. No `.env` required.
 
 ```bash
 python3 rocm_visualizer.py
@@ -76,7 +76,7 @@ The dashboard runs locally and the API is available at `http://0.0.0.0:8080`.
 ### Client mode — monitor a remote GPU system
 
 Set `API_URL` in `.env` to point at a server running in server mode.
-No `rocm-smi` installation required on the client machine.
+No `amd-smi` installation required on the client machine.
 
 ```bash
 cp .env.example .env
@@ -115,7 +115,7 @@ python3 rocm_visualizer.py --api --env /etc/rocm-visualizer/.env
 
 | `.env` has `API_URL`? | `--api` flag | Mode                                  |
 |-----------------------|--------------|---------------------------------------|
-| No                    | No           | Local (rocm-smi direct, no server)   |
+| No                    | No           | Local (amd-smi direct, no server)   |
 | No                    | Yes          | Local + API server                    |
 | Yes                   | ignored      | Client (fetches from remote API)      |
 
@@ -129,7 +129,7 @@ python3 rocm_visualizer.py --api --env /etc/rocm-visualizer/.env
 | **Temperatures**     | Edge, Junction, Memory, VR GFX, VR SoC, VR Memory — all in °C with sparklines |
 | **Clock Frequencies**| SCLK (GPU Core), MCLK (Memory), FCLK (Infinity Fabric), SOCCLK (SoC) in MHz + average |
 | **Voltages & System**| GFX / SoC / Memory voltages (mV), PCIe link (width + speed), Perf Level, Power Profile, Power Cap |
-| **Active Processes** | PID, process name, VRAM used, GPU count — via `rocm-smi --showpids`     |
+| **Active Processes** | PID, process name, VRAM used, GPU count — via `amd-smi process --json`     |
 | **GPU Kernel Log**   | Live feed from `journalctl -k`, filtered for `amdgpu`, `kfd`, `rocm`, `drm` keywords |
 
 ### Log severity colours
@@ -162,7 +162,7 @@ X-API-Token: <your-token>
 | Method | Path                            | Auth | Description                          |
 |--------|---------------------------------|------|--------------------------------------|
 | GET    | `/api/v1/health`                | No   | Liveness check, last update timestamp |
-| GET    | `/api/v1/info`                  | No   | Driver version, rocm-smi version     |
+| GET    | `/api/v1/info`                  | No   | Driver version, amd-smi version     |
 | GET    | `/api/v1/gpus`                  | Yes  | All GPUs, full snapshot              |
 | GET    | `/api/v1/gpus/{idx}`            | Yes  | Single GPU by device index           |
 | GET    | `/api/v1/gpus/{idx}/temperatures` | Yes | Edge, junction, memory, VR temps   |
@@ -246,28 +246,9 @@ The client UI is identical to the local dashboard. Sparkline history is maintain
 
 ---
 
-## Adding support for a new rocm-smi version
+## amd-smi compatibility
 
-When AMD ships a new `rocm-smi` version with changed output format, only the `PATTERNS` dict in `rocm_visualizer.py` needs updating:
-
-1. Open `rocm_visualizer.py` and locate the `PATTERNS` dict.
-2. Copy the `(4, 0)` entry.
-3. Change the key to the new `(major, minor)` version tuple.
-4. Adjust `cli_flags_*` and/or regex strings to match the new output.
-
-```python
-PATTERNS: dict[tuple[int, int], dict] = {
-    (4, 0): { ... },   # existing
-
-    (5, 0): {          # new version
-        "cli_flags": [...],
-        "temp_edge":  r"...",
-        # ...
-    },
-}
-```
-
-The runtime automatically selects the highest registered version that is ≤ the detected version, so older entries remain valid as fallbacks.
+All data is read from `amd-smi metric|static|process --json`. If a future `amd-smi` release changes its JSON layout, only `collect_gpu_data()` and the small helpers above it in `rocm_visualizer.py` need adjusting. Values that `amd-smi` does not provide (e.g. VR temperatures) are hidden in the UI.
 
 ---
 

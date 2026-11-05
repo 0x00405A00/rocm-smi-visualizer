@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
 ROCm SMI Live Dashboard
-Visualizes AMD GPU metrics in real-time using rocm-smi.
+Visualizes AMD GPU metrics in real-time using amd-smi (JSON output).
 Usage: python rocm_visualizer.py [--interval SECONDS]
-
-Adding support for a new rocm-smi version:
-  1. Copy the closest existing entry in PATTERNS below.
-  2. Change the key to the new (major, minor) version tuple.
-  3. Adjust cli_flags_* and/or regex strings to match the new output format.
-  The runtime picks the highest version <= detected version as fallback.
 """
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -35,22 +30,6 @@ from rich import box
 
 
 HISTORY_LEN = 60  # data points kept for sparklines
-
-# Throttle status bitmask → human-readable reason (RDNA2/3, metrics v1.x)
-THROTTLE_BITS: dict[int, str] = {
-    0:  "PPT0",
-    1:  "PPT1",
-    2:  "SPL",
-    3:  "FPPT",
-    4:  "APT",
-    5:  "TDC GFX",
-    6:  "TDC SOC",
-    7:  "TDC MEM",
-    8:  "TDC VDD",
-    13: "PROCHOT CPU",
-    14: "PROCHOT GPU",
-    15: "PROCHOT MEM",
-}
 
 # ---------------------------------------------------------------------------
 # Journal log watcher
@@ -136,146 +115,86 @@ class JournalWatcher:
 
 
 # ---------------------------------------------------------------------------
-# Version-specific pattern registry
-# ---------------------------------------------------------------------------
-# Key   : (major, minor) of "ROCM-SMI version" from `rocm-smi --version`
-#
-# cli_flags_*  : which flags are passed to rocm-smi for each data group
-# All other keys : regex patterns.
-#   - Per-GPU patterns are prepended with  GPU\[N\]\s*:\s*  at runtime.
-#   - Full-line patterns (fan_pct, fan_rpm, power_cap) embed GPU[N] themselves
-#     and use two capture groups: group 1 = GPU index, last group = value.
-#
-# To add a new version: copy the (4, 0) block, bump the key, tweak patterns.
-# ---------------------------------------------------------------------------
-PATTERNS: dict[tuple[int, int], dict] = {
-    (4, 0): {
-        # ---- CLI flags per data group ----
-        "cli_flags":          ["-t", "-u", "--showmemuse", "-P", "-c", "--showvoltage", "--showid"],
-        "cli_flags_powercap": ["--showmaxpower"],
-        "cli_flags_fan":      ["--showfan"],
-        "cli_flags_metrics":  ["--showmetrics"],
-        "cli_flags_procs":    ["--showpids"],
-        "cli_flags_perf":     ["--showperflevel"],
-        "cli_flags_profile":  ["--showprofile"],
-        "cli_flags_vram":     ["--showmeminfo", "vram"],
-        "cli_flags_driver":   ["--showdriverversion"],
-
-        # ---- Driver version (global, fetched once) ----
-        "driver_version":     r"Driver version:\s*(.+)",
-
-        # ---- Detection ----
-        "gpu_index":    r"GPU\[(\d+)\]",
-
-        # ---- Per-GPU: basic ----
-        "device_name":  r"Device Name:\s*(.+)",
-        "temp_edge":    r"Temperature \(Sensor edge\)[^:]*:\s*([\d.]+)",
-        "temp_junction":r"Temperature \(Sensor junction\)[^:]*:\s*([\d.]+)",
-        "temp_mem":     r"Temperature \(Sensor memory\)[^:]*:\s*([\d.]+)",
-        "gpu_use":      r"GPU use \(%\):\s*(\d+)",
-        "vram_pct":      r"GPU Memory Allocated \(VRAM%\):\s*(\d+)",
-        "vram_used_b":   r"VRAM Total Used Memory \(B\):\s*(\d+)",
-        "vram_total_b":  r"VRAM Total Memory \(B\):\s*(\d+)",
-        "mem_activity": r"GPU Memory Read/Write Activity \(%\):\s*(\d+)",
-        "power_avg":    r"Average Graphics Package Power \(W\):\s*([\d.]+)",
-        "voltage":      r"Voltage \(mV\):\s*(\d+)",
-        # clocks: "sclk clock level: 1: (2712Mhz)"
-        "sclk":         r"sclk clock level[^(]*\(?(\d+)Mhz",
-        "mclk":         r"mclk clock level[^(]*\(?(\d+)Mhz",
-        "fclk":         r"fclk clock level[^(]*\(?(\d+)Mhz",
-        "socclk":       r"socclk clock level[^(]*\(?(\d+)Mhz",
-
-        # ---- Per-GPU: --showmetrics ----
-        "temp_vrgfx":   r"temperature_vrgfx \(C\):\s*([\d.]+)",
-        "temp_vrsoc":   r"temperature_vrsoc \(C\):\s*([\d.]+)",
-        "temp_vrmem":   r"temperature_vrmem \(C\):\s*([\d.]+)",
-        "throttle":     r"throttle_status:\s*(\d+)",
-        "pcie_width":   r"pcie_link_width \(Lanes\):\s*(\d+)",
-        "pcie_speed":   r"pcie_link_speed \(0\.1 GT/s\):\s*(\d+)",   # ÷10 → GT/s
-        "voltage_gfx":  r"voltage_gfx \(mV\):\s*(\d+)",
-        "voltage_soc":  r"voltage_soc \(mV\):\s*(\d+)",
-        "voltage_mem":  r"voltage_mem \(mV\):\s*(\d+)",
-        "vcn_activity": r"vcn_activity \(%\):\s*\[(\d+)",            # first engine
-        "avg_gfxclk":   r"average_gfxclk_frequency \(MHz\):\s*(\d+)",
-        "fan_rpm_metrics": r"current_fan_speed \(rpm\):\s*(\d+)",
-
-        # ---- Per-GPU: --showperflevel ----
-        "perf_level":   r"Performance Level:\s*(\w+)",
-
-        # ---- Full-line patterns (GPU index embedded) ----
-        "power_cap":    r"GPU\[(\d+)\][^\n]*Max Graphics Package Power \(W\):\s*([\d.]+)",
-        "fan_pct":      r"GPU\[(\d+)\][^\n]*Fan Level[^\(]*\((\d+)%\)",
-        "fan_rpm":      r"GPU\[(\d+)\][^\n]*Fan RPM:\s*(\d+)",
-
-        # ---- Full-output: --showprofile (active entry marked with *) ----
-        "power_profile": r"Available power profile[^:]*:\s*([^\n*]+)\*",
-    },
-
-    # Template for next version — copy, bump key, adjust as needed:
-    # (5, 0): { ... },
-}
-
-
-# ---------------------------------------------------------------------------
-# Version detection & pattern lookup
+# amd-smi helpers (JSON output)
 # ---------------------------------------------------------------------------
 
-def detect_rocm_smi_version() -> tuple[int, int]:
+def run_amd_smi(*args: str):
+    """Run `amd-smi <args> --json` and return the parsed JSON (or None)."""
     try:
         out = subprocess.run(
-            ["rocm-smi", "--version"],
-            capture_output=True, text=True, timeout=5,
+            ["amd-smi", *args, "--json"],
+            capture_output=True, text=True, timeout=10,
         ).stdout
-        m = re.search(r"ROCM-SMI version:\s*(\d+)\.(\d+)", out)
+        return json.loads(out)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+
+
+def detect_amd_smi_version() -> tuple[int, int]:
+    """Return (major, minor) of the amd-smi tool, (0, 0) if unavailable."""
+    data = run_amd_smi("version")
+    try:
+        entry = data[0] if isinstance(data, list) else data
+        m = re.match(r"(\d+)\.(\d+)", entry["version"])
         if m:
             return int(m.group(1)), int(m.group(2))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (TypeError, KeyError, IndexError):
         pass
-    return (4, 0)
+    return (0, 0)
 
 
-def get_patterns(version: tuple[int, int] | None = None) -> tuple[dict, tuple[int, int]]:
-    if not PATTERNS:
-        raise RuntimeError("PATTERNS registry is empty.")
-    if version is None:
-        version = detect_rocm_smi_version()
-    candidates = [v for v in PATTERNS if v <= version]
-    key = max(candidates) if candidates else min(PATTERNS)
-    return PATTERNS[key], key
-
-
-# ---------------------------------------------------------------------------
-# rocm-smi subprocess helper
-# ---------------------------------------------------------------------------
-
-def run_rocm_smi(*flags: str) -> str:
-    try:
-        return subprocess.run(
-            ["rocm-smi", *flags],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _float(text: str, pattern: str, group: int = 1, default=None):
-    m = re.search(pattern, text)
-    if m:
+def _val(node, default=None):
+    """Extract a number from amd-smi values: {"value": 3, "unit": "W"}, 3 or "N/A"."""
+    if isinstance(node, dict):
+        node = node.get("value")
+    if isinstance(node, (int, float)):
+        return float(node)
+    if isinstance(node, str):
         try:
-            return float(m.group(group))
+            return float(node)
         except ValueError:
-            return m.group(group)
+            pass
     return default
+
+
+def _gpu_entries(data) -> list[dict]:
+    if isinstance(data, dict):
+        data = data.get("gpu_data", [])
+    return [e for e in (data or []) if isinstance(e, dict) and "gpu" in e]
 
 
 # ---------------------------------------------------------------------------
 # Data collection
 # ---------------------------------------------------------------------------
 
-def fetch_driver_version(pat: dict) -> str:
-    raw = run_rocm_smi(*pat["cli_flags_driver"])
-    m = re.search(pat["driver_version"], raw)
-    return m.group(1).strip() if m else "N/A"
+def fetch_driver_version() -> str:
+    for e in _gpu_entries(run_amd_smi("static", "--driver")):
+        v = (e.get("driver") or {}).get("version")
+        if v:
+            return str(v)
+    data = run_amd_smi("version")
+    try:
+        return str((data[0] if isinstance(data, list) else data)["amdgpu_version"])
+    except (TypeError, KeyError, IndexError):
+        return "N/A"
+
+
+def fetch_static_info() -> dict[int, dict]:
+    """Per-GPU static data: device name and power cap (fetched once)."""
+    info: dict[int, dict] = {}
+    for e in _gpu_entries(run_amd_smi("static", "--asic", "--limit")):
+        ppt0 = (e.get("limit") or {}).get("ppt0") or {}
+        cap = _val(ppt0.get("socket_power_limit")) or _val(ppt0.get("max_power_limit"))
+        info[int(e["gpu"])] = {
+            "name":      (e.get("asic") or {}).get("market_name") or f"GPU {e['gpu']}",
+            "power_cap": cap,
+        }
+    return info
+
+
+def fetch_power_caps() -> dict:
+    return {i: d["power_cap"] for i, d in fetch_static_info().items() if d["power_cap"]}
+
 
 def fetch_loaded_models() -> Optional[str]:
     """
@@ -311,157 +230,135 @@ def fetch_loaded_models() -> Optional[str]:
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
-def fetch_power_caps(pat: dict) -> dict:
-    raw = run_rocm_smi(*pat["cli_flags_powercap"])
-    caps = {}
-    for m in re.finditer(pat["power_cap"], raw):
-        caps[int(m.group(1))] = float(m.group(2))
-    return caps
+
+def _fmt_mem(node) -> str:
+    """Format a memory value from amd-smi (usually {"value": N, "unit": "MB"})."""
+    unit = node.get("unit", "B") if isinstance(node, dict) else "B"
+    v = _val(node)
+    if v is None:
+        return str(node)
+    mult = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}.get(unit.upper(), 1)
+    mb = v * mult / 1024 ** 2
+    return f"{mb / 1024:.1f} GB" if mb >= 1024 else f"{mb:.0f} MB"
 
 
-def parse_kfd_processes(raw: str) -> list[dict]:
-    """Parse the KFD process table from --showpids output."""
-    procs = []
-    in_table = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if line.startswith("PID") and "PROCESS NAME" in line:
-            in_table = True
-            continue
-        if not in_table or not line:
-            continue
-        parts = line.split("\t")
-        parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) >= 4:
-            try:
-                vram_bytes = int(parts[3])
-                vram_mb = vram_bytes / (1024 ** 2)
-                vram_str = f"{vram_mb / 1024:.1f} GB" if vram_mb >= 1024 else f"{vram_mb:.0f} MB"
-            except ValueError:
-                vram_str = parts[3]
+def fetch_processes() -> dict[int, list[dict]]:
+    """GPU processes per GPU index from `amd-smi process --json`."""
+    result: dict[int, list[dict]] = {}
+    for e in _gpu_entries(run_amd_smi("process")):
+        procs = []
+        for item in e.get("process_list", []) or []:
+            p = item.get("process_info") if isinstance(item, dict) else None
+            if not isinstance(p, dict):
+                continue  # e.g. "No running processes detected"
+            mem = p.get("mem_usage") or p.get("memory_usage") or {}
+            if isinstance(mem, dict) and "vram_mem" in mem:
+                mem = mem["vram_mem"]
             procs.append({
-                "pid":   parts[0],
-                "name":  parts[1],
-                "gpus":  parts[2],
-                "vram":  vram_str,
+                "pid":  str(p.get("pid", "?")),
+                "name": str(p.get("name", "?")),
+                "gpus": "1",
+                "vram": _fmt_mem(mem) if mem else "N/A",
             })
-    return procs
+        result[int(e["gpu"])] = procs
+    return result
 
 
-def decode_throttle(status: int) -> tuple[str, str]:
-    """Return (label, rich_style) for a throttle_status bitmask value."""
-    if status == 0:
+def decode_throttle(status) -> tuple[str, str]:
+    """Return (label, rich_style) for a throttle status (0/False = OK)."""
+    if not status:
         return "OK", "bold green"
-    reasons = [name for bit, name in THROTTLE_BITS.items() if status & (1 << bit)]
-    label = "THROTTLED" + (f" ({', '.join(reasons)})" if reasons else f" (0x{status:x})")
-    return label, "bold red"
+    return "THROTTLED", "bold red"
 
 
-def collect_gpu_data(pat: dict, power_caps: dict | None = None) -> list[dict]:
-    raw       = run_rocm_smi(*pat["cli_flags"])
-    metrics   = run_rocm_smi(*pat["cli_flags_metrics"])
-    fan_raw   = run_rocm_smi(*pat["cli_flags_fan"])
-    perf_raw  = run_rocm_smi(*pat["cli_flags_perf"])
-    prof_raw  = run_rocm_smi(*pat["cli_flags_profile"])
-    procs_raw = run_rocm_smi(*pat["cli_flags_procs"])
-    vram_raw  = run_rocm_smi(*pat["cli_flags_vram"])
-
-    gpu_indices = sorted(set(re.findall(pat["gpu_index"], raw)))
-    if not gpu_indices:
+def collect_gpu_data(static_info: dict[int, dict] | None = None,
+                     power_caps: dict | None = None) -> list[dict]:
+    metric_data = run_amd_smi("metric")
+    entries = _gpu_entries(metric_data)
+    if not entries:
         return []
 
-    processes = parse_kfd_processes(procs_raw)
+    static_info = static_info or {}
+    processes   = fetch_processes()
 
-    # Active power profile (global, not per-GPU)
-    prof_m = re.search(pat["power_profile"], prof_raw)
-    active_profile = prof_m.group(1).strip() if prof_m else "N/A"
+    profiles = {
+        int(e["gpu"]): (e.get("profile") or {}).get("current", "N/A")
+        for e in _gpu_entries(run_amd_smi("static", "--profile"))
+    }
 
     gpus = []
-    for idx in gpu_indices:
-        pfx = rf"GPU\[{idx}\]\s*:\s*"
+    for e in entries:
+        idx   = int(e["gpu"])
+        usage = e.get("usage") or {}
+        power = e.get("power") or {}
+        clock = e.get("clock") or {}
+        temp  = e.get("temperature") or {}
+        pcie  = e.get("pcie") or {}
+        fan   = e.get("fan") or {}
+        mem   = e.get("mem_usage") or {}
 
-        def pv(key: str, default=None, src: str = raw) -> float | None:
-            return _float(src, pfx + pat[key], 1, default)
+        def clk(key: str) -> float:
+            return _val((clock.get(key) or {}).get("clk"), 0.0)
 
-        def pv_m(key: str, default=None) -> float | None:
-            return _float(metrics, pfx + pat[key], 1, default)
+        vcn = usage.get("vcn_activity")
+        vcn_val = _val(vcn[0], 0.0) if isinstance(vcn, list) and vcn else _val(vcn, 0.0)
 
-        def pv_v(key: str, default=None) -> float | None:
-            return _float(vram_raw, pfx + pat[key], 1, default)
+        vram_used  = _val(mem.get("used_vram"), 0.0)
+        vram_total = _val(mem.get("total_vram"), 1.0) or 1.0
 
-        # Fan: full-line patterns embed GPU index
-        def fan_val(key: str) -> float | None:
-            pattern = pat[key].replace(r"(\d+)", idx, 1)
-            m = re.search(pattern, fan_raw)
-            if m:
-                try:
-                    return float(m.group(m.lastindex))
-                except (ValueError, TypeError):
-                    pass
-            return None
-
-        name_m = re.search(pfx + pat["device_name"], raw)
-        device_name = name_m.group(1).strip() if name_m else f"GPU {idx}"
-
-        perf_m = re.search(pfx + pat["perf_level"], perf_raw)
-        perf_level = perf_m.group(1).strip() if perf_m else "N/A"
-
-        throttle_raw = pv_m("throttle", 0)
-        throttle_val = int(throttle_raw) if throttle_raw is not None else 0
+        throttle_raw = str(power.get("throttle_status", "")).upper()
+        throttle_val = 1 if throttle_raw and throttle_raw not in ("UNTHROTTLED", "N/A") else 0
         throttle_label, throttle_style = decode_throttle(throttle_val)
 
-        pcie_speed_raw = pv_m("pcie_speed")
-        pcie_speed = round(pcie_speed_raw / 10, 1) if pcie_speed_raw else None
+        perf_level = str(e.get("perf_level", "N/A")).replace("AMDSMI_DEV_PERF_LEVEL_", "").lower()
 
-        # Fan RPM: prefer --showfan, fall back to --showmetrics
-        fan_rpm = fan_val("fan_rpm")
-        if fan_rpm is None:
-            fan_rpm = pv_m("fan_rpm_metrics")
-        fan_pct = fan_val("fan_pct")
+        fan_pct = _val(fan.get("usage"))
+        if fan_pct is None:
+            speed, fmax = _val(fan.get("speed")), _val(fan.get("max"))
+            fan_pct = round(speed / fmax * 100, 1) if speed is not None and fmax else None
 
-        # Note: --showpids "GPU(s)" column is a count, not an index,
-        # so we show all KFD processes here (correct for single-GPU setups).
-        gpu_procs = processes
+        sinfo = static_info.get(idx, {})
+        cap = (power_caps or {}).get(idx) or sinfo.get("power_cap") or 327.0
 
         gpus.append({
-            "idx":             int(idx),
-            "name":            device_name,
+            "idx":             idx,
+            "name":            sinfo.get("name", f"GPU {idx}"),
             # basic
-            "temp_edge":       pv("temp_edge",    0.0),
-            "temp_junction":   pv("temp_junction",0.0),
-            "temp_mem":        pv("temp_mem",      0.0),
-            "gpu_use":         pv("gpu_use",       0.0),
-            "vram_pct":        pv("vram_pct",       0.0),
-            "vram_used_mb":    (pv_v("vram_used_b",  0.0) or 0.0) / 1024 ** 2,
-            "vram_total_mb":   (pv_v("vram_total_b", 1.0) or 1.0) / 1024 ** 2,
-            "mem_activity":    pv("mem_activity",  0.0),
-            "power_avg":       pv("power_avg",     0.0),
-            "power_cap":       (power_caps or {}).get(int(idx), 327.0),
-            "sclk":            pv("sclk",          0.0),
-            "mclk":            pv("mclk",          0.0),
-            "fclk":            pv("fclk",          0.0),
-            "socclk":          pv("socclk",        0.0),
-            "voltage":         pv("voltage",       0.0),
+            "temp_edge":       _val(temp.get("edge"), 0.0),
+            "temp_junction":   _val(temp.get("hotspot"), 0.0),
+            "temp_mem":        _val(temp.get("mem"), 0.0),
+            "gpu_use":         _val(usage.get("gfx_activity"), 0.0),
+            "vram_pct":        round(vram_used / vram_total * 100, 1),
+            "vram_used_mb":    vram_used,
+            "vram_total_mb":   vram_total,
+            "mem_activity":    _val(usage.get("umc_activity"), 0.0),
+            "power_avg":       _val(power.get("socket_power"), 0.0),
+            "power_cap":       cap,
+            "sclk":            clk("gfx_0"),
+            "mclk":            clk("mem_0"),
+            "fclk":            clk("fclk_0"),
+            "socclk":          clk("socclk_0"),
+            "voltage":         _val(power.get("gfx_voltage"), 0.0),
             "fan_pct":         fan_pct,
-            "fan_rpm":         fan_rpm,
-            # metrics
-            "temp_vrgfx":      pv_m("temp_vrgfx",  0.0),
-            "temp_vrsoc":      pv_m("temp_vrsoc",  0.0),
-            "temp_vrmem":      pv_m("temp_vrmem",  0.0),
+            "fan_rpm":         _val(fan.get("rpm")),
+            # metrics (amd-smi does not expose VR temperatures → 0)
+            "temp_vrgfx":      0.0,
+            "temp_vrsoc":      0.0,
+            "temp_vrmem":      0.0,
             "throttle_val":    throttle_val,
             "throttle_label":  throttle_label,
             "throttle_style":  throttle_style,
-            "pcie_width":      pv_m("pcie_width"),
-            "pcie_speed":      pcie_speed,
-            "voltage_gfx":     pv_m("voltage_gfx", 0.0),
-            "voltage_soc":     pv_m("voltage_soc", 0.0),
-            "voltage_mem":     pv_m("voltage_mem", 0.0),
-            "vcn_activity":    pv_m("vcn_activity", 0.0),
-            "avg_gfxclk":      pv_m("avg_gfxclk",  0.0),
+            "pcie_width":      _val(pcie.get("width")),
+            "pcie_speed":      _val(pcie.get("speed")),
+            "voltage_gfx":     _val(power.get("gfx_voltage"), 0.0),
+            "voltage_soc":     _val(power.get("soc_voltage"), 0.0),
+            "voltage_mem":     _val(power.get("mem_voltage"), 0.0),
+            "vcn_activity":    vcn_val,
+            "avg_gfxclk":      0.0,
             # system
             "perf_level":      perf_level,
-            "power_profile":   active_profile,
-            "processes":       gpu_procs,
+            "power_profile":   profiles.get(idx, "N/A"),
+            "processes":       processes.get(idx, []),
         })
 
     return gpus
@@ -516,7 +413,6 @@ def build_dashboard(
     histories: dict,
     interval: float,
     rocm_version: tuple[int, int],
-    pattern_key: tuple[int, int],
     log_entries: list[LogEntry] | None = None,
     driver_version: str = "N/A",
 ) -> Layout:
@@ -530,9 +426,7 @@ def build_dashboard(
     )
 
     # ── Header ──────────────────────────────────────────────────────────────
-    ver_str   = f"rocm-smi {rocm_version[0]}.{rocm_version[1]}"
-    pat_note  = f"  [dim](patterns {pattern_key[0]}.{pattern_key[1]})[/dim]" \
-                if pattern_key != rocm_version else ""
+    ver_str   = f"amd-smi {rocm_version[0]}.{rocm_version[1]}"
     gpu_names = "  |  ".join(
         f"[bold cyan]GPU {g['idx']}: {g['name']}[/bold cyan]" for g in all_gpus
     ) if all_gpus else "[red]no GPU detected[/red]"
@@ -542,7 +436,7 @@ def build_dashboard(
     header_table.add_row(
         Text.from_markup(
             f"[bold white on dark_blue] ROCm SMI Dashboard [/bold white on dark_blue]"
-            f"   [dim]{now}[/dim]   [bold cyan]{ver_str}[/bold cyan]{pat_note}"
+            f"   [dim]{now}[/dim]   [bold cyan]{ver_str}[/bold cyan]"
             f"   [dim]interval: {interval}s[/dim]",
             justify="left",
         )
@@ -559,7 +453,7 @@ def build_dashboard(
 
     if not all_gpus:
         layout["body"].update(
-            Panel("[red]No ROCm GPU detected or rocm-smi not available.[/red]")
+            Panel("[red]No ROCm GPU detected or amd-smi not available.[/red]")
         )
         return layout
 
@@ -637,6 +531,8 @@ def build_dashboard(
             ("VR Memory",  "temp_vrmem"),
         ]:
             val = g[key]
+            if key.startswith("temp_vr") and not val:
+                continue  # amd-smi does not report VR temperatures
             temp_table.add_row(
                 label,
                 Text(f"{val:.1f}", style=color_temp(val)),
@@ -856,7 +752,7 @@ def create_api_app(store: DataStore, token: str, info: dict | None = None):
 
     app = FastAPI(
         title="ROCm SMI REST API",
-        description="Live AMD GPU metrics from rocm-smi",
+        description="Live AMD GPU metrics from amd-smi",
         version="1.0.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -880,7 +776,7 @@ def create_api_app(store: DataStore, token: str, info: dict | None = None):
 
     @app.get("/api/v1/info", tags=["system"])
     async def get_info():
-        """System info: driver version, rocm-smi version. No authentication required."""
+        """System info: driver version, amd-smi version. No authentication required."""
         return info or {}
 
     @app.get("/api/v1/gpus", tags=["gpu"], dependencies=[Depends(require_token)])
@@ -1109,10 +1005,9 @@ def main():
 
         info          = client.fetch_info()
         driver_version = info.get("driver_version", "N/A")
-        rv             = info.get("rocm_smi_version", [4, 0])
-        rocm_version   = (rv[0], rv[1]) if isinstance(rv, list) else (4, 0)
-        pattern_key    = rocm_version
-        console.print(f"[green]Connected. Driver: {driver_version}  rocm-smi: {rocm_version[0]}.{rocm_version[1]}[/green]")
+        rv             = info.get("amd_smi_version", info.get("rocm_smi_version", [0, 0]))
+        rocm_version   = (rv[0], rv[1]) if isinstance(rv, list) else (0, 0)
+        console.print(f"[green]Connected. Driver: {driver_version}  amd-smi: {rocm_version[0]}.{rocm_version[1]}[/green]")
 
         gpus      = client.fetch_gpus()
         loadedModels      = client.fetch_loaded_models()
@@ -1144,7 +1039,7 @@ def main():
 
                 live.update(build_dashboard(
                     gpus,loadedModels, histories, args.interval,
-                    rocm_version, pattern_key,
+                    rocm_version,
                     log_entries=logs,
                     driver_version=driver_version,
                 ))
@@ -1152,17 +1047,12 @@ def main():
         return
 
     # ── SERVER / LOCAL MODE ───────────────────────────────────────────────────
-    console.print("[cyan]Local mode — detecting ROCm SMI version…[/cyan]")
-    rocm_version = detect_rocm_smi_version()
-    pat, pattern_key = get_patterns(rocm_version)
-
-    if pattern_key != rocm_version:
-        console.print(
-            f"[yellow]rocm-smi {rocm_version[0]}.{rocm_version[1]} not in registry — "
-            f"using patterns {pattern_key[0]}.{pattern_key[1]} as fallback.[/yellow]"
-        )
-    else:
-        console.print(f"[green]rocm-smi {rocm_version[0]}.{rocm_version[1]} — patterns matched.[/green]")
+    console.print("[cyan]Local mode — detecting amd-smi version…[/cyan]")
+    rocm_version = detect_amd_smi_version()
+    if rocm_version == (0, 0):
+        console.print("[red]amd-smi not found or not working. Is it installed and in $PATH?[/red]")
+        sys.exit(1)
+    console.print(f"[green]amd-smi {rocm_version[0]}.{rocm_version[1]}[/green]")
 
     log_watcher = JournalWatcher()
     log_watcher.start()
@@ -1171,7 +1061,7 @@ def main():
     else:
         console.print("[dim]journalctl not available — log panel disabled.[/dim]")
 
-    driver_version = fetch_driver_version(pat)
+    driver_version = fetch_driver_version()
     console.print(f"[green]AMD Driver: {driver_version}[/green]")
 
     # ── Optional API server ───────────────────────────────────────────────────
@@ -1185,7 +1075,7 @@ def main():
             sys.exit(1)
         sys_info = {
             "driver_version":   driver_version,
-            "rocm_smi_version": list(rocm_version),
+            "amd_smi_version": list(rocm_version),
         }
         api_app = create_api_app(store, api_token, info=sys_info)
         if api_app is None:
@@ -1201,12 +1091,13 @@ def main():
             f"http://{api_cfg['host']}:{api_cfg['port']}/api/docs[/green]"
         )
 
-    power_caps = fetch_power_caps(pat)
+    static_info = fetch_static_info()
+    power_caps  = {i: d["power_cap"] for i, d in static_info.items() if d["power_cap"]}
 
     loadedModels      = fetch_loaded_models()
-    gpus = collect_gpu_data(pat, power_caps)
+    gpus = collect_gpu_data(static_info, power_caps)
     if not gpus:
-        console.print("[red]No ROCm GPUs found. Is rocm-smi installed?[/red]")
+        console.print("[red]No ROCm GPUs found. Is amd-smi installed?[/red]")
         sys.exit(1)
 
     histories = {
@@ -1216,7 +1107,7 @@ def main():
 
     with Live(console=console, refresh_per_second=4, screen=True) as live:
         while True:
-            gpus = collect_gpu_data(pat, power_caps)
+            gpus = collect_gpu_data(static_info, power_caps)
             logs = log_watcher.recent(200) if log_watcher.available else None
 
             for g in gpus:
@@ -1230,7 +1121,7 @@ def main():
 
             live.update(build_dashboard(
                 gpus,loadedModels, histories, args.interval,
-                rocm_version, pattern_key,
+                rocm_version,
                 log_entries=logs,
                 driver_version=driver_version,
             ))

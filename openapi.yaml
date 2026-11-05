@@ -12,7 +12,7 @@ info:
     ## Data freshness
     The server updates its internal snapshot every `--interval` seconds
     (default: 2 s).  The `updated` field in each response contains the
-    ISO-8601 timestamp of the last successful rocm-smi poll.
+    ISO-8601 timestamp of the last successful amd-smi poll.
   version: 1.0.0
   contact:
     name: rocm-visualizer
@@ -62,7 +62,7 @@ components:
         driver_version:
           type: string
           example: "6.17.0-19-generic"
-        rocm_smi_version:
+        amd_smi_version:
           type: array
           items:
             type: integer
@@ -462,7 +462,7 @@ paths:
   /api/v1/info:
     get:
       summary: System information
-      description: Returns driver version and rocm-smi version of the server. No authentication required.
+      description: Returns driver version and amd-smi version of the server. No authentication required.
       operationId: getInfo
       tags: [system]
       security: []
@@ -475,7 +475,7 @@ paths:
                 $ref: "#/components/schemas/InfoResponse"
               example:
                 driver_version: "6.17.0-19-generic"
-                rocm_smi_version: [4, 0]
+                amd_smi_version: [27, 1]
 
   /api/v1/gpus:
     get:
@@ -612,7 +612,7 @@ paths:
   /api/v1/gpus/{idx}/processes:
     get:
       summary: Active GPU processes
-      description: Returns the list of KFD processes currently using the GPU (via `rocm-smi --showpids`).
+      description: Returns the list of KFD processes currently using the GPU (via `amd-smi process --json`).
       operationId: getProcesses
       tags: [gpu]
       parameters:
